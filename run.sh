@@ -6,5 +6,5 @@ export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
 python=/home/liyk/miniconda3/envs/CudaForge/bin/python
 
 # run test
-cd /home/liyk/code/kernel-proj/skill
+cd "$(dirname "$0")"
 $python test.py

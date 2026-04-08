@@ -7,7 +7,7 @@
 
 import torch
 import time
-from model import Model, get_inputs
+from model import Model, get_inputs, get_init_inputs
 from model_new import ModelNew
 
 def test_correctness(model, model_new, inputs):
@@ -87,8 +87,13 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # 0. 初始化
-    model = Model().to(device)
-    model_new = ModelNew().to(device)
+    init_inputs = [x for x in get_init_inputs()]
+    model = Model(*init_inputs).to(device)
+    model_new = ModelNew(*init_inputs).to(device)
+
+    # 同步权重：Model 与 ModelNew 结构一致，直接按同名参数复制
+    model_new.load_state_dict(model.state_dict())
+
     inputs = [x.to(device) for x in get_inputs()]
 
     # 1. 正确性测试 -> 2. 性能测试 -> 3. Profiling
