@@ -74,7 +74,7 @@ def profile_model_new(model_new, inputs):
             torch.profiler.ProfilerActivity.CPU,
             torch.profiler.ProfilerActivity.CUDA,
         ],
-        on_trace_ready=torch.profiler.tensorboard_trace_handler('./output/log'),
+        # on_trace_ready=torch.profiler.tensorboard_trace_handler('./output/log'),
         record_shapes=True,
         with_stack=True
     ) as prof:
