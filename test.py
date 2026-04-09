@@ -41,15 +41,13 @@ def test_performance(model, model_new, inputs, iterations=1000):
         model.eval()
         model_new.eval()
 
-        # Warm up: 预热 GPU，确保时钟频率稳定并初始化算子
-        print("正在进行 Warmup...")
+        # Test Model
+        print("正在进行 Model Warmup...")
         with torch.no_grad():
             for _ in range(50):
                 model(*inputs)
-                model_new(*inputs)
         torch.cuda.synchronize()
 
-        # Test Model
         print("正在测试 Model...")
         with torch.no_grad():
             start_time = time.time()
@@ -60,6 +58,11 @@ def test_performance(model, model_new, inputs, iterations=1000):
         print(f"Model 平均耗时: {model_time * 1000:.6f} ms")
 
         # Test ModelNew
+        print("正在进行 ModelNew Warmup...")
+        with torch.no_grad():
+            for _ in range(50):
+                model_new(*inputs)
+        torch.cuda.synchronize()
         print("正在测试 ModelNew...")
         with torch.no_grad():
             start_time = time.time()
