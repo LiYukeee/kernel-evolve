@@ -43,10 +43,26 @@ related_files:
 
 回滚后在本轮记录中显式标注 `rollback: true`。
 
+**重要：rollback 不等于放弃目标**。回滚后该目标保持 `pending` 状态，`retry_count` +1。仅当 `retry_count >= max_retries`（3）时才标记为 `skip`。
+
+# 重试与目标切换
+
+当某目标被 rollback 但仍有重试次数时：
+
+1. 分析上一次失败的根因（launch overhead、非 coalesced 访存、寄存器压力等）。
+2. 采用明确不同的策略重试，不得重复相同方案。
+3. 在 JSON 记录中注明上次失败原因和本次策略差异。
+4. 参考 `toolkit/optimization-toolkit.md#迭代精炼策略` 选择改进方向。
+
+当某目标的 CUDA kernel 已成功获得加速时，可以选择：
+- 继续优化该 kernel（进一步调整配置、向量化、shared memory 等）
+- 将目标标记为 `done`，转向下一个 `pending` 目标的 CUDA 改写
+
 # 早停建议
 
-- 连续多轮仅微小收益可提前终止探索。
-- 当剩余目标都处于低收益类别时优先转入 Phase 3。
+- 仅当所有 `pending` 目标均已变为 `done` 或 `skip` 时，才进入 Phase 3。
+- 不得因连续 rollback 而提前终止探索，应换策略重试或切换目标。
+- **不得因为手写 CUDA kernel 困难而转向 `torch.compile` 等编译器捷径**。
 
 ---
 

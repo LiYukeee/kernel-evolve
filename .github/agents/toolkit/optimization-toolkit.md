@@ -9,6 +9,20 @@ related_files:
   - rules-and-heuristics.md
 ---
 
+# 禁止技术（硬约束）
+
+以下手段**严禁使用**，无论是作为优化方案还是降级后备：
+
+| 禁止项 | 原因 |
+|---|---|
+| `torch.compile` / `torch._dynamo` / `torch._inductor` | 编译器自动生成 kernel，不属于手写 CUDA |
+| `torch.jit.trace` / `torch.jit.script` | JIT 编译器代替手写 kernel |
+| Triton（`@triton.jit`、`triton.autotune`） | Triton DSL 不属于 CUDA/C++ 手写 |
+| `functorch.compile` / `torch.fx` 变换 | 自动图变换 |
+| 任何其他自动代码生成/编译加速手段 | 目标是手写 CUDA kernel |
+
+唯一允许的加速路径：通过 `torch.utils.cpp_extension.load_inline` 编译加载手写 CUDA/C++ kernel。
+
 # 工具选择检查单
 
 1. 先确定 `current_target` 类型。
@@ -54,6 +68,20 @@ related_files:
 - 编译统一通过 `torch.utils.cpp_extension.load_inline`。
 - 仅替换当前目标 OP，避免无关改动干扰评估。
 - 关注数值一致性与边界条件，必要时先守正确性再追性能。
+- **所有优化必须是手写 CUDA/C++ 代码**，不得使用编译器自动生成的 kernel。
+
+# 迭代精炼策略
+
+当某个 CUDA kernel 的首次实现未达到加速（被 rollback），不应立即放弃，而应尝试以下改进方向：
+
+1. **访存优化**：检查 memory coalescing，改用 `float4` 向量化加载/存储
+2. **线程/block 配置**：调整 block size（128/256/512）、grid 策略（per-row vs per-element）
+3. **Shared memory**：将频繁访问的数据缓存到 shared memory
+4. **算法重构**：改变计算策略（如 one-pass vs two-pass、warp-level reduction vs block-level）
+5. **减少 kernel 数量**：合并多个小 kernel 为一个
+6. **降低 launch overhead**：增大每个 block/thread 的工作量
+
+每个目标 OP 最多允许 3 次 rollback（可通过 op_plan 中的 `retry_count` 追踪）。超出后标记 `skip`，转向下一个目标。
 
 # CUDA Graph 阶段
 

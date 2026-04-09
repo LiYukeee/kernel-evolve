@@ -20,12 +20,14 @@ related_files:
 ```json
 {
   "op_list": [
-    {"id": "g1", "type": "fusion_group", "ops": ["conv1", "bn1", "relu"], "status": "pending"}
+    {"id": "g1", "type": "fusion_group", "ops": ["conv1", "bn1", "relu"], "status": "pending", "retry_count": 0}
   ]
 }
 ```
 
-约束：`status` 仅允许 `pending`/`in_progress`/`done`/`skip`。
+约束：
+- `status` 仅允许 `pending`/`in_progress`/`done`/`skip`。
+- `retry_count`：该目标被 rollback 的次数，初始为 0，达到 `max_retries`（默认 3）时标记为 `skip`。
 
 # round_000_baseline.json
 

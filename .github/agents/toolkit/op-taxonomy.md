@@ -35,6 +35,7 @@ related_files:
 - `library_backed` standalone 不作为当前目标。
 - `normalizer` standalone 不优先优化，除非与前后文强相关且无法融合。
 - `trivial` 不参与任何优化轮次。
+- **降级策略**：当某个目标的 CUDA kernel 多次失败时，降级为 `skip` 并转向下一个目标，**不得降级为 `torch.compile` 等编译器方案**。
 
 # 推理模式注意事项
 
