@@ -15,13 +15,22 @@ def test_correctness(model, model_new, inputs):
     with torch.no_grad():
         output = model(*inputs)
         output_new = model_new(*inputs)
-    
-    if torch.allclose(output, output_new, atol=1e-5):
+
+    # 分块比较，避免 allclose 一次性分配与 output 等大的临时 tensor
+    max_diff = 0.0
+    chunk = 256
+    for i in range(0, output.shape[0], chunk):
+        diff = (output[i:i+chunk] - output_new[i:i+chunk]).abs().max().item()
+        max_diff = max(max_diff, diff)
+    del output, output_new
+    torch.cuda.empty_cache()
+
+    if max_diff <= 1e-5:
         print("✅ 正确性测试通过：Model 和 ModelNew 的输出一致。")
         return True
     else:
         print("❌ 正确性测试失败：Model 和 ModelNew 的输出不一致。")
-        print(f"最大偏差: {(output - output_new).abs().max().item()}")
+        print(f"最大偏差: {max_diff}")
         return False
 
 def test_performance(model, model_new, inputs, iterations=1000):
@@ -62,14 +71,14 @@ def test_performance(model, model_new, inputs, iterations=1000):
         
         speedup = model_time / model_new_time
         print(f"加速比: {speedup:.2f}x")
-        return True
+        return model_time, model_new_time, speedup
     except Exception as e:
         print(f"❌ 性能测试过程中出现错误: {e}")
-        return False
+        return None
 
 def profile_model_new(model_new, inputs):
     print("正在对 ModelNew 进行 Profiling...")
-    with torch.profiler.profile(
+    with torch.no_grad(), torch.profiler.profile(
         activities=[
             torch.profiler.ProfilerActivity.CPU,
             torch.profiler.ProfilerActivity.CUDA,
@@ -97,8 +106,17 @@ if __name__ == "__main__":
     inputs = [x.to(device) for x in get_inputs()]
 
     # 1. 正确性测试 -> 2. 性能测试 -> 3. Profiling
-    if test_correctness(model, model_new, inputs) and \
-       test_performance(model, model_new, inputs):
-        profile_model_new(model_new, inputs)
+    if test_correctness(model, model_new, inputs):
+        perf_result = test_performance(model, model_new, inputs)
+        if perf_result is not None:
+            model_time, model_new_time, speedup = perf_result
+            del model
+            torch.cuda.empty_cache()
+            profile_model_new(model_new, inputs)
+            torch.cuda.empty_cache()
+            print(
+                f"FINAL_SPEED_RESULT: model={model_time * 1000:.6f} ms, "
+                f"model_new={model_new_time * 1000:.6f} ms, speedup={speedup:.2f}x"
+            )
 
 
