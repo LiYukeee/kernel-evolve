@@ -7,8 +7,65 @@
 
 import torch
 import time
+import signal
+import sys
+import shutil
+import os
 from model import Model, get_inputs, get_init_inputs
-from model_new import ModelNew
+
+COMPILE_TIMEOUT = 300  # 秒，超过此时间视为编译卡死
+WARM_UP_TIMES = 20
+TEST_ITERATIONS = 100
+
+# ---------- 带超时的 ModelNew 编译导入 ----------
+class _CompileTimeoutError(Exception):
+    pass
+
+def _timeout_handler(signum, frame):
+    raise _CompileTimeoutError()
+
+def _clear_compile_cache(ext_name: str = "softmax_v2"):
+    """清除 torch cpp_extension 针对指定扩展的编译缓存目录。"""
+    try:
+        from torch.utils.cpp_extension import get_default_build_root
+        build_root = get_default_build_root()
+    except Exception:
+        build_root = os.path.join(os.path.expanduser("~"), ".cache", "torch_extensions")
+    # torch 会在 build_root/<python_ver>_<cuda_ver>/<ext_name>/ 下存放缓存
+    # 用 glob 匹配以避免硬编码 Python/CUDA 版本号
+    cleared = False
+    if os.path.isdir(build_root):
+        for sub in os.listdir(build_root):
+            cache_dir = os.path.join(build_root, sub, ext_name)
+            if os.path.isdir(cache_dir):
+                shutil.rmtree(cache_dir)
+                print(f"已清除编译缓存：{cache_dir}")
+                cleared = True
+    if not cleared:
+        print("未找到对应的编译缓存目录，无需清除。")
+
+signal.signal(signal.SIGALRM, _timeout_handler)
+signal.alarm(COMPILE_TIMEOUT)
+try:
+    print(f"正在编译 ModelNew（超时阈值 {COMPILE_TIMEOUT}s）...")
+    from model_new import ModelNew
+    signal.alarm(0)  # 编译成功，取消闹钟
+    print("ModelNew 编译完成。")
+except _CompileTimeoutError:
+    signal.alarm(0)
+    print(f"❌ ModelNew 编译超时（>{COMPILE_TIMEOUT}s），进程可能已卡死。")
+    print("正在清除编译缓存以便下次重新编译...")
+    _clear_compile_cache()
+    print("请修复 CUDA kernel 代码后重新运行。")
+    sys.exit(1)
+except Exception as _compile_exc:
+    signal.alarm(0)
+    print(f"❌ ModelNew 编译失败：{_compile_exc}")
+    print("正在清除编译缓存以便下次重新编译...")
+    _clear_compile_cache()
+    print("请修复上述错误后重新运行。")
+    sys.exit(1)
+# ------------------------------------------------
 
 def test_correctness(model, model_new, inputs):
     print("正在进行正确性测试...")
@@ -44,32 +101,32 @@ def test_performance(model, model_new, inputs, iterations=1000):
         # Test Model
         print("正在进行 Model Warmup...")
         with torch.no_grad():
-            for _ in range(50):
+            for _ in range(WARM_UP_TIMES):
                 model(*inputs)
         torch.cuda.synchronize()
 
         print("正在测试 Model...")
         with torch.no_grad():
             start_time = time.time()
-            for _ in range(iterations):
+            for _ in range(TEST_ITERATIONS):
                 model(*inputs)
             torch.cuda.synchronize()
-        model_time = (time.time() - start_time) / iterations
+        model_time = (time.time() - start_time) / TEST_ITERATIONS
         print(f"Model 平均耗时: {model_time * 1000:.6f} ms")
 
         # Test ModelNew
         print("正在进行 ModelNew Warmup...")
         with torch.no_grad():
-            for _ in range(50):
+            for _ in range(WARM_UP_TIMES):
                 model_new(*inputs)
         torch.cuda.synchronize()
         print("正在测试 ModelNew...")
         with torch.no_grad():
             start_time = time.time()
-            for _ in range(iterations):
+            for _ in range(TEST_ITERATIONS):
                 model_new(*inputs)
             torch.cuda.synchronize()
-        model_new_time = (time.time() - start_time) / iterations
+        model_new_time = (time.time() - start_time) / TEST_ITERATIONS
         print(f"ModelNew 平均耗时: {model_new_time * 1000:.6f} ms")
         
         speedup = model_time / model_new_time
