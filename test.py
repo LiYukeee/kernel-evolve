@@ -12,10 +12,23 @@ import sys
 import shutil
 import os
 from model import Model, get_inputs, get_init_inputs
+import numpy as np
+import subprocess
+import os
 
 COMPILE_TIMEOUT = 300  # 秒，超过此时间视为编译卡死
 WARM_UP_TIMES = 20
 TEST_ITERATIONS = 100
+
+def autoChooseCudaDevice():
+    try:
+        cmd = 'nvidia-smi -q -d Memory |grep -A4 GPU|grep Used'
+        result = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE).stdout.decode().split('\n')
+        os.environ['CUDA_VISIBLE_DEVICES']=str(np.argmin([int(x.split()[2]) for x in result[:-1]]))
+        print(f'--- Auto chose CUDA device {os.environ["CUDA_VISIBLE_DEVICES"]} ---')
+    except:
+        print('--- Failed to auto choose CUDA device, using default ---')
+autoChooseCudaDevice()
 
 # ---------- 带超时的 ModelNew 编译导入 ----------
 class _CompileTimeoutError(Exception):
