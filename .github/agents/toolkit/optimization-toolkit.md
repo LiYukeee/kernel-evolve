@@ -81,7 +81,20 @@ related_files:
 5. **减少 kernel 数量**：合并多个小 kernel 为一个
 6. **降低 launch overhead**：增大每个 block/thread 的工作量
 
-每个目标 OP 最多允许 3 次 rollback（可通过 op_plan 中的 `retry_count` 追踪）。超出后标记 `skip`，转向下一个目标。
+## 退出条件（per-target）
+
+每个目标 OP 的持续优化受以下**任一条件**限制，触发即切换：
+
+| 条件 | 阈值 | 动作 |
+|---|---|---|
+| rollback 次数 | `retry_count >= 3` | 标记 `skip` |
+| 边际收益饱和 | `stagnant_count >= 2`（连续 2 轮 speedup 提升 < 1%） | 标记 `saturated` |
+| Amdahl ceiling 耗尽 | `target_ceiling - best_speedup < 0.03` | 标记 `done` |
+| 热点漂移 | 其他 pending 目标的 `Self CUDA %` 显著更高（差 > 3%） | 暂停当前（保持 `pending`），切换 |
+
+详细计算公式见 `toolkit/rules-and-heuristics.md#amdahl-ceiling-计算` 和 `#饱和检测`。
+
+> **核心原则**：不要在单个 OP 上花费超过必要的轮次。用同样的轮次覆盖更多 OP 几乎总是比深挖单个 OP 产出更高的总加速比。
 
 # CUDA Graph 阶段
 

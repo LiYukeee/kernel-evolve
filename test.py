@@ -18,7 +18,6 @@ import os
 
 COMPILE_TIMEOUT = 300  # 秒，超过此时间视为编译卡死
 WARM_UP_TIMES = 20
-TEST_ITERATIONS = 100
 
 def autoChooseCudaDevice():
     try:
@@ -120,10 +119,10 @@ def test_performance(model, model_new, inputs, iterations=1000):
         print("正在测试 Model...")
         with torch.no_grad():
             start_time = time.time()
-            for _ in range(TEST_ITERATIONS):
+            for _ in range(iterations):
                 model(*inputs)
             torch.cuda.synchronize()
-        model_time = (time.time() - start_time) / TEST_ITERATIONS
+        model_time = (time.time() - start_time) / iterations
         print(f"Model 平均耗时: {model_time * 1000:.6f} ms")
 
         # Test ModelNew
@@ -135,10 +134,10 @@ def test_performance(model, model_new, inputs, iterations=1000):
         print("正在测试 ModelNew...")
         with torch.no_grad():
             start_time = time.time()
-            for _ in range(TEST_ITERATIONS):
+            for _ in range(iterations):
                 model_new(*inputs)
             torch.cuda.synchronize()
-        model_new_time = (time.time() - start_time) / TEST_ITERATIONS
+        model_new_time = (time.time() - start_time) / iterations
         print(f"ModelNew 平均耗时: {model_new_time * 1000:.6f} ms")
         
         speedup = model_time / model_new_time
@@ -148,23 +147,36 @@ def test_performance(model, model_new, inputs, iterations=1000):
         print(f"❌ 性能测试过程中出现错误: {e}")
         return None
 
-def profile_model_new(model_new, inputs):
+def profile_model_new(model_new, inputs, profile_output=None):
     print("正在对 ModelNew 进行 Profiling...")
     with torch.no_grad(), torch.profiler.profile(
         activities=[
             torch.profiler.ProfilerActivity.CPU,
             torch.profiler.ProfilerActivity.CUDA,
         ],
-        # on_trace_ready=torch.profiler.tensorboard_trace_handler('./output/log'),
         record_shapes=True,
         with_stack=True
     ) as prof:
         for _ in range(10):
             model_new(*inputs)
     
-    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+    table = prof.key_averages().table(sort_by="cuda_time_total", row_limit=10)
+    print(table)
+    if profile_output:
+        os.makedirs(os.path.dirname(profile_output) or ".", exist_ok=True)
+        with open(profile_output, "w") as f:
+            f.write(table)
+        print(f"Profiling 结果已保存到 {profile_output}")
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=["full", "quick", "correctness"], default="full",
+                        help="full=1000iter+profiling(default), quick=100iter无profiling, correctness=仅正确性")
+    args = parser.parse_args()
+
+    TEST_ITERATIONS = 100 if args.mode == "quick" else 1000
+
     autoChooseCudaDevice()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -180,16 +192,20 @@ if __name__ == "__main__":
 
     # 1. 正确性测试 -> 2. 性能测试 -> 3. Profiling
     if test_correctness(model, model_new, inputs):
-        perf_result = test_performance(model, model_new, inputs)
-        if perf_result is not None:
-            model_time, model_new_time, speedup = perf_result
-            del model
-            torch.cuda.empty_cache()
-            profile_model_new(model_new, inputs)
-            torch.cuda.empty_cache()
-            print(
-                f"FINAL_SPEED_RESULT: model={model_time * 1000:.6f} ms, "
-                f"model_new={model_new_time * 1000:.6f} ms, speedup={speedup:.2f}x"
-            )
-
+        if args.mode == "correctness":
+            print("CORRECTNESS_ONLY: PASS")
+        else:
+            perf_result = test_performance(model, model_new, inputs, iterations=TEST_ITERATIONS)
+            if perf_result is not None:
+                model_time, model_new_time, speedup = perf_result
+                del model
+                torch.cuda.empty_cache()
+                if args.mode == "full":
+                    profile_model_new(model_new, inputs,
+                                      profile_output="output/profile_latest.txt")
+                    torch.cuda.empty_cache()
+                print(
+                    f"FINAL_SPEED_RESULT: model={model_time * 1000:.6f} ms, "
+                    f"model_new={model_new_time * 1000:.6f} ms, speedup={speedup:.2f}x"
+                )
 

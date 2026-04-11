@@ -69,6 +69,8 @@ tools: [execute, read, edit, search, agent, web, todo]
 | `best_speedup` | 1.00x | 历史最高加速比 |
 | `current_target` | — | 当前优化目标（OP 名或融合组描述） |
 | `retry_count` | 0（per target） | 当前目标连续 rollback 次数，≥3 时标记 skip |
+| `stagnant_count` | 0（per target） | 当前目标连续边际收益轮次计数（@ref `toolkit/rules-and-heuristics.md#饱和检测`） |
+| `target_ceiling` | — | 当前目标的 Amdahl ceiling（@ref `toolkit/rules-and-heuristics.md#amdahl-ceiling-计算`） |
 
 `base` 更新条件（满足任一）：
 - 相比上一 base 的倍率提升 ≥ 1.1
@@ -123,10 +125,11 @@ tools: [execute, read, edit, search, agent, web, todo]
    - **运行时错误**：检查 tensor shape/dtype 不匹配、越界访问、launch 配置
    - **数值错误**：检查精度问题（float 累加顺序、边界条件、reduction 正确性）
 2. **修复**：仅修改 `model_new.py` 解决问题
-3. **保存 + 评估**：
+3. **验证**：运行 `bash run.sh correctness` 快速确认修复是否成功
+4. **保存 + 评估**：
    - `cp model_new.py output/round_NNN.py`
    - 写 `output/round_NNN_repair.json`（@ref `toolkit/json-schemas.md#round_nnn_repairjson`）
-   - 运行 `bash run.sh`，将输出回填到 JSON 的 `run_output` 字段
+   - 运行 `bash run.sh` 获取完整性能数据和 profiling，将输出回填到 JSON 的 `run_output` 字段
 
 ### 2.3 分支 B：成功优化
 
@@ -139,7 +142,7 @@ tools: [execute, read, edit, search, agent, web, todo]
 从上一轮 `bash run.sh` 输出中提取两类信息：
 
 1. **性能指标**：解析 `model_time`、`model_new_time`、`speedup`，更新 `base` / `best` 状态变量。
-2. **Profiling 数据**：解析 profiling 表格（每次 `bash run.sh` 自动输出），提取各 CUDA kernel 的 `Self CUDA`、`Self CUDA %`、`CUDA total`、`# of Calls`。
+2. **Profiling 数据**：读取 `output/profile_latest.txt`（每次 `bash run.sh full` 自动生成），提取各 CUDA kernel 的 `Self CUDA`、`Self CUDA %`、`CUDA total`、`# of Calls`。可选拷贝为 `output/round_NNN_profile.txt` 用于跨轮对比。
 
 **利用 profiling 信息的方式**：
 
@@ -150,12 +153,21 @@ tools: [execute, read, edit, search, agent, web, todo]
 
 根据上一轮的**性能指标 + profiling 结果**决定本轮方向：
 
+> **核心原则：广度优先于深度。** 一个占总耗时 5% 的 kernel 即使优化到极限也只能贡献约 5% 的总加速。当某目标的边际收益递减时，应立即切换到下一个热点 OP，用同等轮次覆盖更多 OP 来最大化总体加速比。
+
+**在选择「继续当前目标」还是「切换新目标」之前，必须先执行以下两项检查**（@ref `toolkit/rules-and-heuristics.md#饱和检测` 和 `#amdahl-ceiling-计算`）：
+
+1. **Amdahl ceiling 检查**：计算当前目标的理论天花板 `target_ceiling = model_time / (model_new_time - target_self_cuda_ms)`。若 `target_ceiling - best_speedup < 0.03`（即使目标 kernel 完全消除也只能再提升 <3%），标记为 `done` 并切换。
+2. **饱和检测**：若连续 2 轮在同一目标上的总 speedup 提升均 < 1%（相对），`stagnant_count` 达到 2，标记为 `saturated`（等同 `done`）并切换。
+3. **热点漂移检查**：对比 profiling，若当前目标的 `Self CUDA %` 已低于另一 pending 目标的 `Self CUDA %`，应切换到占比更高的目标。
+
 | 情况 | 决策 |
 |---|---|
-| **(a)** 上轮 CUDA kernel 成功加速，且 profiling 显示该 kernel 仍有优化空间（未达带宽极限，或存在可合并的相邻 kernel） | 继续深度优化该 kernel（调配置/向量化/shared memory），或尝试融合相邻 OP |
-| **(b)** 上轮 CUDA kernel 成功加速，但 profiling 显示该 kernel 已接近带宽极限（`Self CUDA %` 接近 100% 且时间接近理论下限） | 标记当前目标为 done，从 profiling 中选择下一个热点目标 |
-| **(c)** 上轮 rollback 且 `retry_count < 3` | 结合 profiling 分析失败原因（如 kernel 时间反而增加），换策略重试同一目标（@ref `toolkit/optimization-toolkit.md#迭代精炼策略`） |
-| **(d)** 上轮目标已 done/skip | 从 profiling 热点中选择新的 pending 目标（@ref `toolkit/rules-and-heuristics.md#op-选择优先级`） |
+| **(a)** 上轮成功加速，ceiling 检查和饱和检测均未触发，且当前目标仍是 profiling 最大可优化热点 | 继续深度优化该 kernel（调配置/向量化/shared memory），或尝试融合相邻 OP |
+| **(b)** 上轮成功加速，但触发 **ceiling 检查**（剩余提升空间 < 3%）或 **饱和检测**（连续 2 轮边际 < 1%） | 标记当前目标为 done/saturated，从 profiling 中选择下一个热点目标 |
+| **(c)** 上轮成功加速，但 **热点漂移检查** 发现另一目标的 `Self CUDA %` 更高 | 暂停当前目标（保持 `pending`），切换到更高价值目标。当前目标后续轮次可回来 |
+| **(d)** 上轮 rollback 且 `retry_count < 3` | 结合 profiling 分析失败原因（如 kernel 时间反而增加），换策略重试同一目标（@ref `toolkit/optimization-toolkit.md#迭代精炼策略`） |
+| **(e)** 上轮目标已 done/skip/saturated | 从 profiling 热点中选择新的 pending 目标（@ref `toolkit/rules-and-heuristics.md#op-选择优先级`） |
 
 **目标选择优先级**（从 profiling 的 `Self CUDA` / `CUDA total` 热点中选取）：
 1. 可融合算子组（如 matmul+add+activation 的 epilogue 融合，注意：不替换主体 GEMM/conv，只融合其后处理）
@@ -195,8 +207,9 @@ tools: [execute, read, edit, search, agent, web, todo]
 
 1. `cp model_new.py output/round_NNN.py`
 2. 写 `output/round_NNN_opt.json`（@ref `toolkit/json-schemas.md#round_nnn_optjson`）
-3. 运行 `bash run.sh`，将输出回填到 JSON
-4. **Rollback 判定**：若新 speedup < `base_speedup`（性能回退），则：
+3. 运行 `bash run.sh`（即 `bash run.sh full`），将输出回填到 JSON
+4. 可选：`cp output/profile_latest.txt output/round_NNN_profile.txt` 保存本轮 profiling 快照
+5. **Rollback 判定**：若新 speedup < `base_speedup`（性能回退），则：
    - 回滚 `model_new.py` 到 `output/round_{base_round}.py`
    - 在 JSON 中标注 `rollback: true`
    - `retry_count++`；若 `retry_count ≥ 3` → 标记该目标为 skip，下一轮选新目标
@@ -227,14 +240,32 @@ tools: [execute, read, edit, search, agent, web, todo]
 
 ---
 
+## 运行模式与使用场景
+
+`run.sh` 支持三种模式，按场景选择：
+
+| 模式 | 命令 | 耗时 | 输出 | 使用场景 |
+|---|---|---|---|---|
+| `full` (默认) | `bash run.sh` | ~5min | 正确性 + 1000iter 性能 + profiling + `output/profile_latest.txt` | 每轮最终评估（分支 B 步骤 2.3.3） |
+| `quick` | `bash run.sh quick` | ~30s | 正确性 + 100iter 性能 | 开发中快速验证性能趋势 |
+| `correctness` | `bash run.sh correctness` | ~5s | 仅正确性 | 修复后快速确认（分支 A 步骤 3） |
+
+**推荐工作流**：修改代码 → `bash run.sh correctness` 确认正确性 → `bash run.sh quick` 确认性能趋势 → `bash run.sh` 获取完整性能数据和 profiling。
+
+---
+
 # 工具使用规范
 
 | 操作 | 命令 | 说明 |
 |---|---|---|
-| 运行评估 | `bash run.sh` | 唯一的编译/测试/profiling 入口 |
+| 完整评估 | `bash run.sh` 或 `bash run.sh full` | 正确性 + 1000iter 性能测试 + profiling，profiling 结果自动保存到 `output/profile_latest.txt` |
+| 快速迭代 | `bash run.sh quick` | 正确性 + 100iter 性能测试，无 profiling，适合开发过程中快速验证 |
+| 正确性检查 | `bash run.sh correctness` | 仅运行正确性测试，最快反馈 |
 | 读参考实现 | `read model.py` | 理解语义，不修改 |
 | 修改 kernel | `edit model_new.py` | 唯一可修改的核心文件 |
 | 保存快照 | `cp model_new.py output/round_NNN.py` | 每轮写 JSON 前先保存 |
 | 写轮次记录 | `edit output/round_NNN_*.json` | 每轮必须保存 |
-| 查阅历史 | `read output/round_NNN.py` / `.json` | 回溯代码与元数据 |
+| 读 profiling | `read output/profile_latest.txt` | 读取最近一次 `bash run.sh full` 的 profiling 结果 |
+| 保存 profiling 快照 | `cp output/profile_latest.txt output/round_NNN_profile.txt` | 可选，用于跨轮对比 |
+| 查阅历史 | `read output/round_NNN.py` / `.json` / `_profile.txt` | 回溯代码、元数据与 profiling |
 | 加载策略 | `read .github/agents/toolkit/*.md` | 按需加载，不强制预加载 |

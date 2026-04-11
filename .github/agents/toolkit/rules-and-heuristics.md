@@ -30,8 +30,8 @@ related_files:
 
 - `best_kernel`：只要当前 speedup 超过历史最高，立即更新。
 - `base_kernel`：满足任一条件才更新：
-  - 相比上一 base 的倍率提升 >= 1.3
-  - 绝对 speedup 提升 >= 0.3
+  - 相比上一 base 的倍率提升 >= 1.1
+  - 绝对 speedup 提升 >= 0.1
 
 # rollback 规则
 
@@ -45,7 +45,43 @@ related_files:
 
 **重要：rollback 不等于放弃目标**。回滚后该目标保持 `pending` 状态，`retry_count` +1。仅当 `retry_count >= max_retries`（3）时才标记为 `skip`。
 
+# Amdahl ceiling 计算
+
+在每轮分析阶段，对当前目标计算其理论最大加速比天花板（假设它被完全消除）：
+
+```
+target_self_cuda_ms = 当前目标 kernel 的 Self CUDA time（从 profiling top-10 获取）
+target_ceiling = model_time / (model_new_time - target_self_cuda_ms)
+```
+
+若 `target_ceiling - best_speedup < 0.03`，则即使极限优化也只能再提升 <3%，标记目标为 `done`，切换下一目标。
+
+> **注意**：`target_self_cuda_ms` 应使用 `Self CUDA` 总和（= 单次耗时 × 调用次数），不是单次耗时。
+
+# 饱和检测
+
+对同一目标的连续多轮优化，跟踪 **边际收益**：
+
+```
+marginal_gain_rel = (new_speedup - prev_speedup) / prev_speedup
+```
+
+- 若某轮在同一目标上 `marginal_gain_rel < 0.01`（总 speedup 提升 < 1%）：`stagnant_count += 1`
+- 若 `marginal_gain_rel >= 0.01`：`stagnant_count = 0`（有效提升重置计数）
+- 若 `stagnant_count >= 2`：目标标记为 `saturated`（等同 `done`），**必须**切换到下一个热点目标
+
+rollback 轮不计入 `stagnant_count`，但也不重置它。
+
+# 热点漂移检查
+
+每轮 profiling 后，比较当前目标与其他 pending 目标的 `Self CUDA %`：
+
+- 若存在另一 pending 目标的 `Self CUDA %` **显著高于**当前目标（差值 > 3%），应暂停当前目标（保持 `pending`），切换到更高价值目标
+- 这确保每轮的努力都花在当前最大的瓶颈上
+
 # 重试与目标切换
+
+## rollback 后重试
 
 当某目标被 rollback 但仍有重试次数时：
 
@@ -54,9 +90,14 @@ related_files:
 3. 在 JSON 记录中注明上次失败原因和本次策略差异。
 4. 参考 `toolkit/optimization-toolkit.md#迭代精炼策略` 选择改进方向。
 
-当某目标的 CUDA kernel 已成功获得加速时，可以选择：
-- 继续优化该 kernel（进一步调整配置、向量化、shared memory 等）
-- 将目标标记为 `done`，转向下一个 `pending` 目标的 CUDA 改写
+## 成功后的目标切换决策
+
+当某目标的 CUDA kernel 已成功获得加速时，**不得无限期继续优化**。必须按以下优先级检查：
+
+1. **Amdahl ceiling 检查**：若触发 → 标记 `done`，切换
+2. **饱和检测**：若触发 → 标记 `saturated`，切换
+3. **热点漂移检查**：若触发 → 暂停（保持 `pending`），切换
+4. 以上均未触发：可继续深度优化
 
 # 早停建议
 
