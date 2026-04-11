@@ -28,7 +28,6 @@ def autoChooseCudaDevice():
         print(f'--- Auto chose CUDA device {os.environ["CUDA_VISIBLE_DEVICES"]} ---')
     except:
         print('--- Failed to auto choose CUDA device, using default ---')
-autoChooseCudaDevice()
 
 # ---------- 带超时的 ModelNew 编译导入 ----------
 class _CompileTimeoutError(Exception):
@@ -166,6 +165,7 @@ def profile_model_new(model_new, inputs):
     print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
 
 if __name__ == "__main__":
+    autoChooseCudaDevice()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # 0. 初始化

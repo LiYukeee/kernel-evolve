@@ -32,8 +32,8 @@ related_files:
 
 # 跳过规则
 
-- `library_backed` standalone 不作为当前目标。
-- `normalizer` standalone 不优先优化，除非与前后文强相关且无法融合。
+- `library_backed` standalone **默认低优先级**，但以下情况可作为目标：极小维度导致 launch overhead 占比高、推理期可做参数折叠（如 Conv+BN）、存在可融合 epilogue（如 BN+activation 内联）、profiling 显示 layout 转换开销显著。
+- `normalizer` standalone 不优先优化，但推理期应优先考虑参数折叠（如 BN 折叠进 Conv），折叠后可完全消除该 OP。
 - `trivial` 不参与任何优化轮次。
 - **降级策略**：当某个目标的 CUDA kernel 多次失败时，降级为 `skip` 并转向下一个目标，**不得降级为 `torch.compile` 等编译器方案**。
 
