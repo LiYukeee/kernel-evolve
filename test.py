@@ -28,6 +28,8 @@ def autoChooseCudaDevice():
     except:
         print('--- Failed to auto choose CUDA device, using default ---')
 
+# 必须在任何 CUDA 初始化（包括 load_inline）之前设置 CUDA_VISIBLE_DEVICES
+autoChooseCudaDevice()
 # ---------- 带超时的 ModelNew 编译导入 ----------
 class _CompileTimeoutError(Exception):
     pass
@@ -101,48 +103,41 @@ def test_correctness(model, model_new, inputs):
         print(f"最大偏差: {max_diff}")
         return False
 
-def test_performance(model, model_new, inputs, iterations=1000):
+def _bench_single(m, inputs, name, iterations):
+    """对单个模型进行 warmup + 计时，返回平均每次耗时（秒）。"""
+    print(f"正在进行 {name} Warmup...")
+    with torch.no_grad():
+        for _ in range(WARM_UP_TIMES):
+            m(*inputs)
+    torch.cuda.synchronize()
+    print(f"正在测试 {name}...")
+    with torch.no_grad():
+        start_time = time.time()
+        for _ in range(iterations):
+            m(*inputs)
+        torch.cuda.synchronize()
+    t = (time.time() - start_time) / iterations
+    print(f"{name} 平均耗时: {t * 1000:.6f} ms")
+    return t
+
+def test_performance(model, model_new, model_compile, inputs, iterations=1000):
     try:
         print(f"正在进行性能测试 (迭代次数: {iterations})...")
-        
-        # 启用推理模式
+
         model.eval()
         model_new.eval()
 
-        # Test Model
-        print("正在进行 Model Warmup...")
-        with torch.no_grad():
-            for _ in range(WARM_UP_TIMES):
-                model(*inputs)
-        torch.cuda.synchronize()
+        model_time         = _bench_single(model,         inputs, "Model",            iterations)
+        model_new_time     = _bench_single(model_new,     inputs, "ModelNew",         iterations)
+        model_compile_time = _bench_single(model_compile, inputs, "Model (compiled)", iterations)
 
-        print("正在测试 Model...")
-        with torch.no_grad():
-            start_time = time.time()
-            for _ in range(iterations):
-                model(*inputs)
-            torch.cuda.synchronize()
-        model_time = (time.time() - start_time) / iterations
-        print(f"Model 平均耗时: {model_time * 1000:.6f} ms")
+        baseline = model_time
+        speedup  = baseline / model_new_time
+        print(f"\n加速比汇总（以 Model 为基准）:")
+        print(f"  ModelNew:              {speedup:.2f}x")
+        print(f"  Model (compiled):      {baseline / model_compile_time:.2f}x")
 
-        # Test ModelNew
-        print("正在进行 ModelNew Warmup...")
-        with torch.no_grad():
-            for _ in range(WARM_UP_TIMES):
-                model_new(*inputs)
-        torch.cuda.synchronize()
-        print("正在测试 ModelNew...")
-        with torch.no_grad():
-            start_time = time.time()
-            for _ in range(iterations):
-                model_new(*inputs)
-            torch.cuda.synchronize()
-        model_new_time = (time.time() - start_time) / iterations
-        print(f"ModelNew 平均耗时: {model_new_time * 1000:.6f} ms")
-        
-        speedup = model_time / model_new_time
-        print(f"加速比: {speedup:.2f}x")
-        return model_time, model_new_time, speedup
+        return model_time, model_new_time, model_compile_time, speedup
     except Exception as e:
         print(f"❌ 性能测试过程中出现错误: {e}")
         return None
@@ -177,7 +172,6 @@ if __name__ == "__main__":
 
     TEST_ITERATIONS = 100 if args.mode == "quick" else 1000
 
-    autoChooseCudaDevice()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # 0. 初始化
@@ -188,6 +182,10 @@ if __name__ == "__main__":
     # 同步权重：Model 与 ModelNew 结构一致，直接按同名参数复制
     model_new.load_state_dict(model.state_dict())
 
+    # torch.compile 版本（首次调用时触发追踪/编译，warmup 阶段会完成）
+    print("正在创建 model_compile (torch.compile)...")
+    model_compile = torch.compile(model)
+
     inputs = [x.to(device) for x in get_inputs()]
 
     # 1. 正确性测试 -> 2. 性能测试 -> 3. Profiling
@@ -195,17 +193,24 @@ if __name__ == "__main__":
         if args.mode == "correctness":
             print("CORRECTNESS_ONLY: PASS")
         else:
-            perf_result = test_performance(model, model_new, inputs, iterations=TEST_ITERATIONS)
+            perf_result = test_performance(
+                model, model_new, model_compile,
+                inputs, iterations=TEST_ITERATIONS
+            )
             if perf_result is not None:
-                model_time, model_new_time, speedup = perf_result
-                del model
+                model_time, model_new_time, model_compile_time, speedup = perf_result
+                del model, model_compile
                 torch.cuda.empty_cache()
                 if args.mode == "full":
                     profile_model_new(model_new, inputs,
                                       profile_output="output/profile_latest.txt")
                     torch.cuda.empty_cache()
                 print(
-                    f"FINAL_SPEED_RESULT: model={model_time * 1000:.6f} ms, "
-                    f"model_new={model_new_time * 1000:.6f} ms, speedup={speedup:.2f}x"
+                    f"FINAL_SPEED_RESULT: "
+                    f"model={model_time * 1000:.6f} ms, "
+                    f"model_new={model_new_time * 1000:.6f} ms, "
+                    f"model_compile={model_compile_time * 1000:.6f} ms, "
+                    f"speedup(compile/base)={model_time / model_compile_time:.2f}x, "
+                    f"speedup(new/base)={speedup:.2f}x"
                 )
 
